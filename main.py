@@ -374,7 +374,7 @@ def main():
 
     all_items = new_items + [it for it in existing_items if it["guid"] not in {n["guid"] for n in new_items}]
     all_items.sort(key=lambda x: x["pubdate"])
-    all_items = all_items[:MAX_ITEMS_IN_FEED]
+    all_items = all_items[-MAX_ITEMS_IN_FEED:]
 
     build_feed(all_items)
     save_seen(seen)
