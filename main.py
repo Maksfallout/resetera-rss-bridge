@@ -228,3 +228,160 @@ def clean_text(text, video_urls=None, max_length=8000):
 
     # 1. Обрезаем paywall ПЕРВЫМ — пока текст ещё в исходном виде
     text = cut_paywall_tail(text)
+    # 2. Чистим пробелы и пустые строки
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    # 3. Подвешенные фразы-обрубки в конце текста
+    dangling_patterns = [
+        r"Watch (?:the |it )?(?:trailers?|videos?|below)[^.]*\.?\s*$",
+        r"You can watch[^.]*below\.?\s*$",
+        r"Check (?:it |them )?out below\.?\s*$",
+        r"See (?:the |it )?below\.?\s*$",
+    ]
+    for pattern in dangling_patterns:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.MULTILINE)
+
+    # 4. Хвосты с языковыми ярлыками без видео
+    text = re.sub(
+        r"\n*(?:[A-Z][^\n.]{0,80}\s+(?:English|Japanese|Subtitled|Dubbed|Trailer|Teaser)\b[^\n.]{0,200}){1,}\s*$",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
+
+    text = text.strip()
+
+    # 5. Если видео ровно одно — добавляем
+    if len(video_urls) == 1:
+        text = text + f"\n\nВидео: {video_urls[0]}"
+
+    # 6. Обрезаем по длине
+    if len(text) > max_length:
+        text = text[:max_length].rsplit(" ", 1)[0] + "…"
+
+    return text
+
+
+def build_feed(items):
+    """Собираем выходной RSS-файл из списка обработанных записей."""
+    fg = FeedGenerator()
+    fg.title(FEED_TITLE)
+    fg.link(href=FEED_LINK, rel="alternate")
+    fg.description(FEED_DESCRIPTION)
+    fg.language("en")
+
+    for item in items:
+        fe = fg.add_entry()
+        fe.title(item["title"])
+        # ВАЖНО: в <link> кладём НЕ ссылку на оригинал, а нейтральную заглушку,
+        # чтобы соцсети не делали превью оригинального сайта
+        fe.link(href=ITEM_LINK_PLACEHOLDER)
+        fe.guid(item["guid"], permalink=False)
+        fe.pubDate(item["pubdate"])
+        fe.description(item["fulltext"])
+
+    fg.rss_file(OUTPUT_FEED, pretty=True)
+    print(f"\n✓ Сохранён {OUTPUT_FEED} с {len(items)} записями")
+
+
+def load_existing_items():
+    """Читаем уже опубликованные записи из feed.xml — чтобы не потерять их."""
+    if not os.path.exists(OUTPUT_FEED):
+        return []
+    try:
+        parsed = feedparser.parse(OUTPUT_FEED)
+        items = []
+        for e in parsed.entries:
+            items.append({
+                "title": e.get("title", ""),
+                "url": ITEM_LINK_PLACEHOLDER,
+                "guid": e.get("id", e.get("link", "")),
+                "pubdate": datetime(*e.published_parsed[:6], tzinfo=timezone.utc),
+                "fulltext": e.get("summary", ""),
+            })
+        return items
+    except Exception as e:
+        print(f"Не удалось прочитать старый feed.xml: {e}")
+        return []
+
+
+def main():
+    print(f"=== Запуск {datetime.now().isoformat()} ===")
+    seen = load_seen()
+    print(f"В seen.json: {len(seen)} записей")
+
+    print(f"Качаю RSS: {SOURCE_RSS}")
+    headers = {"User-Agent": USER_AGENT}
+    r = requests.get(SOURCE_RSS, headers=headers, timeout=REQUEST_TIMEOUT)
+    r.raise_for_status()
+    parsed = feedparser.parse(r.content)
+    print(f"Получено записей: {len(parsed.entries)}")
+
+    existing_items = load_existing_items()
+
+    new_items = []
+    for entry in parsed.entries:
+        guid = entry.get("id") or entry.get("link")
+        if guid in seen:
+            continue
+        if len(new_items) >= MAX_NEW_PER_RUN:
+            break
+
+        title = entry.get("title", "Без заголовка")
+        print(f"\n→ Новая запись: {title}")
+
+        content_html = ""
+        if entry.get("content"):
+            content_html = entry.content[0].value
+        elif entry.get("summary"):
+            content_html = entry.summary
+        original_url = extract_original_url(content_html)
+        if not original_url:
+            print("  ✗ Не нашёл ссылку на оригинал, пропускаю")
+            seen.add(guid)
+            continue
+        print(f"  Оригинал: {original_url}")
+
+        fulltext, video_urls = get_full_text(original_url)
+        if not fulltext:
+            seen.add(guid)
+            continue
+        fulltext = clean_text(fulltext, video_urls)
+
+        # Защита от пустоты после обрезки
+        if not fulltext or len(fulltext) < 50:
+            print("  ✗ После очистки текст слишком короткий, пропускаю")
+            seen.add(guid)
+            continue
+
+        pubdate = datetime.now(timezone.utc)
+        if entry.get("published_parsed"):
+            try:
+                pubdate = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+            except Exception:
+                pass
+
+        new_items.append({
+            "title": title,
+            "url": ITEM_LINK_PLACEHOLDER,
+            "guid": guid,
+            "pubdate": pubdate,
+            "fulltext": fulltext,
+        })
+        seen.add(guid)
+        time.sleep(2)
+
+    print(f"\nДобавлено новых: {len(new_items)}")
+
+    all_items = new_items + [it for it in existing_items if it["guid"] not in {n["guid"] for n in new_items}]
+    all_items.sort(key=lambda x: x["pubdate"], reverse=True)
+    all_items = all_items[:MAX_ITEMS_IN_FEED]
+
+    build_feed(all_items)
+    save_seen(seen)
+    print("=== Готово ===")
+
+
+if __name__ == "__main__":
+    main()
