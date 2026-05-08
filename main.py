@@ -69,24 +69,72 @@ def extract_original_url(content_html):
             return href
     return None
 
+def extract_video_urls(html_content):
+    """
+    Достаёт ссылки на видео из HTML страницы.
+    Ищем YouTube/Vimeo iframe-плееры и youtu.be в обычных ссылках.
+    Возвращает список уникальных URL.
+    """
+    if not html_content:
+        return []
+    soup = BeautifulSoup(html_content, "lxml")
+    video_urls = []
+    seen_urls = set()
+
+    # 1. iframe-плееры YouTube/Vimeo
+    for iframe in soup.find_all("iframe", src=True):
+        src = iframe["src"]
+        # Превращаем embed-ссылку в обычную смотрибельную
+        # YouTube: https://www.youtube.com/embed/VIDEO_ID -> https://youtu.be/VIDEO_ID
+        m = re.search(r"youtube\.com/embed/([a-zA-Z0-9_-]+)", src)
+        if m:
+            url = f"https://youtu.be/{m.group(1)}"
+            if url not in seen_urls:
+                video_urls.append(url)
+                seen_urls.add(url)
+            continue
+        # Vimeo: https://player.vimeo.com/video/VIDEO_ID
+        m = re.search(r"player\.vimeo\.com/video/(\d+)", src)
+        if m:
+            url = f"https://vimeo.com/{m.group(1)}"
+            if url not in seen_urls:
+                video_urls.append(url)
+                seen_urls.add(url)
+            continue
+
+    # 2. Обычные ссылки на youtu.be и youtube.com/watch
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        m = re.search(r"(?:youtu\.be/|youtube\.com/watch\?v=)([a-zA-Z0-9_-]+)", href)
+        if m:
+            url = f"https://youtu.be/{m.group(1)}"
+            if url not in seen_urls:
+                video_urls.append(url)
+                seen_urls.add(url)
+
+    return video_urls
 
 def fetch_with_trafilatura(url):
-    """Пробуем извлечь текст через trafilatura (бесплатно, локально, быстро)."""
+    """
+    Извлекаем текст и список видео.
+    Возвращает кортеж (text, video_urls) или (None, []) при неудаче.
+    """
     try:
         downloaded = trafilatura.fetch_url(url)
         if not downloaded:
-            return None
+            return None, []
         text = trafilatura.extract(
             downloaded,
             include_comments=False,
             include_tables=False,
             favor_precision=True,
         )
+        videos = extract_video_urls(downloaded)
         if text and len(text) > 200:
-            return text
+            return text, videos
     except Exception as e:
         print(f"  trafilatura упал: {e}")
-    return None
+    return None, []
 
 
 def fetch_with_jina(url):
@@ -106,26 +154,71 @@ def fetch_with_jina(url):
 
 
 def get_full_text(url):
-    """Двухуровневая стратегия: trafilatura → jina."""
+    """
+    Двухуровневая стратегия: trafilatura → jina.
+    Возвращает кортеж (text, video_urls).
+    """
     print(f"  Загружаю: {url}")
-    text = fetch_with_trafilatura(url)
+    text, videos = fetch_with_trafilatura(url)
     if text:
-        print(f"  ✓ trafilatura: {len(text)} знаков")
-        return text
+        print(f"  ✓ trafilatura: {len(text)} знаков, видео: {len(videos)}")
+        return text, videos
+    # fallback на jina — без извлечения видео (там только текст)
     text = fetch_with_jina(url)
     if text:
         print(f"  ✓ jina (fallback): {len(text)} знаков")
-        return text
+        return text, []
     print("  ✗ Не удалось извлечь текст")
-    return None
+    return None, []
 
 
-def clean_text(text, max_length=8000):
-    """Чистим текст: убираем лишние пустые строки, обрезаем до разумного размера."""
+def clean_text(text, video_urls=None, max_length=8000):
+    """
+    Чистим текст:
+    1. Убираем фразы-обрубки типа 'Watch the trailers below.' если после них пусто
+    2. Убираем хвосты вроде 'Meet the Crew: X English Japanese ...' без содержимого
+    3. Сжимаем множественные пустые строки
+    4. Если видео ровно одно — добавляем его в конец
+    """
+    if video_urls is None:
+        video_urls = []
+
+    # Убираем повторяющиеся пробелы и пустые строки
+    text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
+
+    # Подвешенные фразы-обрубки в конце текста
+    # (после удаления видео остаются "Watch X below" без X)
+    dangling_patterns = [
+        r"Watch (?:the |it )?(?:trailers?|videos?|below)[^.]*\.?\s*$",
+        r"You can watch[^.]*below\.?\s*$",
+        r"Check (?:it |them )?out below\.?\s*$",
+        r"See (?:the |it )?below\.?\s*$",
+    ]
+    for pattern in dangling_patterns:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.MULTILINE)
+
+    # Хвосты с языковыми ярлыками без видео:
+    # "Meet the Crew: X English Japanese Meet the Crew: Y English Japanese"
+    # Признак: подряд идут короткие фразы с English/Japanese/Trailer/Subtitled и т.п.
+    # Срезаем всё начиная с такой последовательности до конца текста.
+    text = re.sub(
+        r"\n*(?:[A-Z][^\n.]{0,80}\s+(?:English|Japanese|Subtitled|Dubbed|Trailer|Teaser)\b[^\n.]{0,200}){1,}\s*$",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
+
     text = text.strip()
+
+    # Если видео ровно одно — добавляем его
+    if len(video_urls) == 1:
+        text = text + f"\n\nВидео: {video_urls[0]}"
+
+    # Обрезаем по длине (мало ли что прислали огромное)
     if len(text) > max_length:
         text = text[:max_length].rsplit(" ", 1)[0] + "…"
+
     return text
 
 
@@ -214,11 +307,11 @@ def main():
         print(f"  Оригинал: {original_url}")
 
         # Скачиваем текст
-        fulltext = get_full_text(original_url)
+        fulltext, video_urls = get_full_text(original_url)
         if not fulltext:
             seen.add(guid)
             continue
-        fulltext = clean_text(fulltext)
+        fulltext = clean_text(fulltext, video_urls)
 
         # Дата публикации
         pubdate = datetime.now(timezone.utc)
