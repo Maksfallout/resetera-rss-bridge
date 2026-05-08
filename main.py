@@ -213,6 +213,45 @@ def cut_paywall_tail(text):
         return cut_text
     return text
 
+def smart_cut(text, max_length):
+    """
+    Умная обрезка текста по концу абзаца или предложения.
+    Ищет ближайший подходящий разрыв НЕ ДАЛЬШЕ max_length знаков от начала.
+    Приоритет: конец абзаца → конец предложения → перенос строки → пробел.
+    """
+    if len(text) <= max_length:
+        return text
+
+    # Берём с запасом и ищем "хорошие" точки разрыва
+    chunk = text[:max_length]
+
+    # 1. Лучший вариант — конец абзаца (двойной перенос строки)
+    last_paragraph = chunk.rfind("\n\n")
+    if last_paragraph > max_length * 0.7:  # не слишком близко к началу
+        return chunk[:last_paragraph].rstrip() + "\n\n…"
+
+    # 2. Конец предложения (точка/восклицание/вопрос + пробел)
+    # Ищем последнее ".  " ".\n" "!\n" и т.д.
+    sentence_endings = []
+    for match in re.finditer(r"[.!?](?:\s|$)", chunk):
+        sentence_endings.append(match.end())
+    if sentence_endings:
+        cut_at = sentence_endings[-1]
+        if cut_at > max_length * 0.7:
+            return chunk[:cut_at].rstrip() + " …"
+
+    # 3. Одиночный перенос строки
+    last_newline = chunk.rfind("\n")
+    if last_newline > max_length * 0.7:
+        return chunk[:last_newline].rstrip() + "\n…"
+
+    # 4. Крайний случай — последний пробел
+    last_space = chunk.rfind(" ")
+    if last_space > 0:
+        return chunk[:last_space] + " …"
+
+    # Совсем крайний — режем как есть
+    return chunk + "…"
 
 def clean_text(text, video_urls=None, max_length=8000):
     """
@@ -256,9 +295,9 @@ def clean_text(text, video_urls=None, max_length=8000):
     if len(video_urls) == 1:
         text = text + f"\n\nВидео: {video_urls[0]}"
 
-    # 6. Обрезаем по длине
+    # 6. Обрезаем по длине, ища "красивое" место для среза
     if len(text) > max_length:
-        text = text[:max_length].rsplit(" ", 1)[0] + "…"
+        text = smart_cut(text, max_length)
 
     return text
 
