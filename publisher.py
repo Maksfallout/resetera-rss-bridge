@@ -32,7 +32,7 @@ MAX_ITEMS_IN_FEED = 10              # сколько последних пост
 # ====== НАСТРОЙКИ КАРТИНОК ======
 IMAGE_API_URL = "https://ask.chadgpt.ru/api/public/flux-1-schnell/imagine"
 IMAGE_CHECK_URL = "https://ask.chadgpt.ru/api/public/check"
-IMAGE_ASPECT_RATIO = "16:9"
+IMAGE_ASPECT_RATIO = "7:4"
 IMAGES_DIR = "images"
 IMAGES_RETENTION_DAYS = 90
 IMAGE_WAIT_TIMEOUT = 120        # макс секунд ждать пока картинка сгенерится
