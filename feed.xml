@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0">
+  <channel>
+    <title>Gaming Daily Pick</title>
+    <link>https://www.resetera.com/forums/gaming-headlines.54/</link>
+    <description>Главная игровая новость дня — рерайт на русском</description>
+    <docs>http://www.rssboard.org/rss-specification</docs>
+    <generator>python-feedgen</generator>
+    <language>ru</language>
+    <lastBuildDate>Fri, 08 May 2026 20:01:34 +0000</lastBuildDate>
+    <item>
+      <title>GTA 6 Could Trigger a $1,000 Console Sticker Shock for Casual Buyers, Analyst Warns Ahead of November Launch</title>
+      <link>https://www.resetera.com/</link>
+      <description>Представь себе: многие просто собираются купить консоль, потому что "GTA 6 выходит в ноябре", а тут ценник под тысячу долларов — шок 😳. Аналитик Circana Мэтт Piscatella говорит, что casual‑игроки могут отказаться от покупки из‑за роста цен и дефицита памяти. Сейчас основная база покупателей — дома с высоким доходом, и средняя цена консоли сильно выросла. Если будущие PlayStation и Xbox подорожают до $1 000–1 200, установка новых игр на одной платформе станет ещё сложнее.</description>
+      <guid isPermaLink="false">1515013</guid>
+      <pubDate>Fri, 08 May 2026 20:01:34 +0000</pubDate>
+    </item>
+  </channel>
+</rss>
