@@ -373,7 +373,7 @@ def main():
     print(f"\nДобавлено новых: {len(new_items)}")
 
     all_items = new_items + [it for it in existing_items if it["guid"] not in {n["guid"] for n in new_items}]
-    all_items.sort(key=lambda x: x["pubdate"], reverse=True)
+    all_items.sort(key=lambda x: x["pubdate"])
     all_items = all_items[:MAX_ITEMS_IN_FEED]
 
     build_feed(all_items)
