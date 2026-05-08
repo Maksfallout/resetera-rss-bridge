@@ -255,6 +255,15 @@ def clean_jina_markdown(text):
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
 
+    # 14. Убираем оставшиеся markdown-маркеры
+    # Заголовки (# ## ### в начале строк) — оставляем сам текст
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    # Висящие одиночные подчёркивания/звёздочки в конце текста или перед переносом
+    text = re.sub(r"[_*]+\s*$", "", text, flags=re.MULTILINE)
+    # Полужирный/курсив **текст** или __текст__ → текст
+    text = re.sub(r"\*{1,2}([^\*\n]+)\*{1,2}", r"\1", text)
+    text = re.sub(r"_{1,2}([^_\n]+)_{1,2}", r"\1", text)
+    
     return text.strip()
 
 
