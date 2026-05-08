@@ -156,10 +156,8 @@ def fetch_with_jina(url):
 
 def clean_jina_markdown(text):
     """
-    Чистит markdown-вывод r.jina.ai от мусора:
-    - убирает шапку до начала статьи
-    - убирает футер после конца статьи
-    - удаляет markdown-ссылки, голые URL, формы подписки
+    Чистит markdown-вывод r.jina.ai от мусора.
+    Стратегия: вырезаем известные мусорные блоки, не трогая остальное.
     """
     # 1. Срезаем всё до "Markdown Content:" (это шапка от jina)
     marker = "Markdown Content:"
@@ -177,37 +175,45 @@ def clean_jina_markdown(text):
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"\b[\w.-]+@[\w.-]+\.\w+\b", "", text)
 
-    # 5. Убираем placeholder-ы для картинок (!Image 1, !Image 18 и т.п.)
+    # 5. Убираем placeholder-ы для картинок
     text = re.sub(r"!?Image \d+(?::[^\n]*)?", "", text)
 
-    # 6. Найти заголовок статьи (# Заголовок) и срезать всё ДО второго его появления
-    # Структура jina: # Заголовок — навигация — # Заголовок — текст статьи
+    # 6. Найти заголовок статьи и срезать всё ДО второго его появления
     h1_matches = list(re.finditer(r"^# ([^\n]+)$", text, flags=re.MULTILINE))
     if len(h1_matches) >= 2:
-        # Второе появление заголовка — это начало основной статьи
         text = text[h1_matches[1].start():]
     elif len(h1_matches) == 1:
-        # Один заголовок — берём всё после него
         text = text[h1_matches[0].end():]
 
-    # 7. Обрезаем хвост — ищем первый признак футера и режем
+    # 7. ТОЧЕЧНО вырезаем формы подписки (не обрезая всё после)
+    # Формы обычно начинаются с призыва и заканчиваются благодарностью
+    subscribe_block_patterns = [
+        # GameSpot-стиль: "Get the latest... Sign Up... Thanks for signing up"
+        r"Get the latest[^.]{0,200}\.\s*Sign Up\s*Sign Up\s*By signing up[^.]+\.\s*Thanks for signing up",
+        # Универсальный: "Sign up for our newsletter... agree to ... Privacy Policy"
+        r"Sign up for[^.]{0,200}\.\s*[^.]{0,300}Privacy Policy[^.]{0,100}",
+        # Просто двойной "Sign Up Sign Up" с окружением
+        r"Sign Up\s+Sign Up\b[^.]{0,300}",
+        # "Subscribe to our newsletter" с продолжением
+        r"Subscribe to (?:our )?newsletter[^.]{0,300}",
+    ]
+    for pattern in subscribe_block_patterns:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.DOTALL)
+
+    # 8. Обрезаем хвост — только реальные футерные маркеры
+    # (точно не появляются в основном тексте)
     footer_markers = [
-        r"©\s*\d{4}",                          # копирайт
-        r"Got a news tip",                     # обычный конец статей gamespot
-        r"This topic is locked",
-        r"Leave Blank",
-        r"More Sites",
+        r"©\s*\d{4}.*?ALL RIGHTS RESERVED",
+        r"©\s*\d{4}\s+FANDOM",
+        r"This topic is locked from further discussion",
+        r"More Sites\s*\*\s*gamefaqs",
         r"We've updated our Privacy Policy",
         r"Manage Consent Preferences",
         r"Strictly Necessary Cookies",
-        r"Do Not Sell or Share",
-        r"Cookie Preferences",
-        r"ALL RIGHTS RESERVED",
-        r"Sign up for(?:\s+\w+){0,5}\s+newsletter",
-        r"Get the latest gaming news",         # форма подписки gamespot
-        r"By signing up, you agree",
-        r"Use your keyboard",
+        r"Do Not Sell or Share My Personal Data",
         r"Where does your image live",
+        r"Use your keyboard!",
+        r"Got a news tip or want to contact us",
     ]
     earliest_footer = len(text)
     for pattern in footer_markers:
@@ -217,38 +223,35 @@ def clean_jina_markdown(text):
     if earliest_footer < len(text):
         text = text[:earliest_footer]
 
-    # 8. Убираем строки навигационных меню (длинные строки с кучей звёздочек)
+    # 9. Убираем строки навигационных меню
     lines = text.split("\n")
     cleaned_lines = []
     for line in lines:
         stripped = line.strip()
-        # Строки с большой плотностью звёздочек = меню
         if stripped.count("*") >= 5 and len(stripped) < 800:
             continue
-        # Строки только из звёздочек/тире/пайпов
         if re.match(r"^[\s*\-|·•]+$", stripped):
             continue
         cleaned_lines.append(line)
     text = "\n".join(cleaned_lines)
 
-    # 9. Убираем мусорные конструкции типа "Sign Up Sign Up", "Upvote (1)"
-    text = re.sub(r"\bSign Up\s+Sign Up\b", "", text)
+    # 10. Убираем мелкий мусор
     text = re.sub(r"\bUpvote \(\d+\)", "", text)
     text = re.sub(r"\bSee More\b", "", text)
-    text = re.sub(r"\bThanks for signing up\b", "", text)
+    text = re.sub(r"\bLeave Blank\b", "", text)
+    text = re.sub(r"^GameSpot Report$", "", text, flags=re.MULTILINE)
 
-    # 10. Убираем перечни платформ-тегов в конце статей
-    # ("Nintendo Switch Nintendo Switch 2 PC PlayStation 4 PlayStation 5 Xbox One Xbox Series X")
+    # 11. Убираем перечни платформ-тегов
     text = re.sub(
         r"(?:(?:Nintendo Switch ?2?|PC|PlayStation [45]|Xbox (?:One|Series X)) ?){3,}",
         "",
         text,
     )
 
-    # 11. Убираем подпись "By Имя Фамилия on Date"
+    # 12. Убираем подпись "By Имя Фамилия on Date"
     text = re.sub(r"^By [^\n]{1,150}$", "", text, flags=re.MULTILINE)
 
-    # 12. Сжимаем пустые строки
+    # 13. Сжимаем пустые строки и пробелы
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
 
