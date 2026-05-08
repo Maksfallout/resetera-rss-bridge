@@ -1,0 +1,256 @@
+"""
+Публикатор: раз в сутки выбирает лучшую статью через ИИ-куратора,
+скачивает её полный текст, делает рерайт+перевод через ИИ-рерайтера,
+и кладёт результат в feed.xml для Hooppy.
+"""
+
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+
+import requests
+from feedgen.feed import FeedGenerator
+
+from common import (
+    POOL_FILE, PUBLISHED_FILE, OUTPUT_FEED, ITEM_LINK_PLACEHOLDER,
+    REQUEST_TIMEOUT,
+    load_json, save_json, get_full_text,
+)
+
+# ====== НАСТРОЙКИ ИИ ======
+CHADGPT_API_URL = "https://ask.chadgpt.ru/api/public/gpt-5-mini"
+TEXT_FOR_REWRITER_LIMIT = 8000      # сколько знаков статьи отдаём ИИ
+MAX_ITEMS_IN_FEED = 10              # сколько последних постов держим в feed.xml
+# ==========================
+
+FEED_TITLE = "Gaming Daily Pick"
+FEED_LINK = "https://www.resetera.com/forums/gaming-headlines.54/"
+FEED_DESCRIPTION = "Главная игровая новость дня — рерайт на русском"
+
+CURATOR_PROMPT = """Ты — главный редактор популярного канала о консольных играх и игровой индустрии. Перед тобой список заголовков свежих новостей за последние сутки. Выбери ОДИН — самый интересный для геймерской аудитории.
+
+Критерии:
+- Значимость для индустрии или сообщества (анонсы, релизы, заявления крупных компаний, скандалы, цифры продаж, новости платформ)
+- Способность вызвать обсуждение, эмоцию, любопытство
+- Баланс между важностью и интересностью
+
+Избегай: мелких локальных новостей, нишевых обзоров инди-игр, статей о фан-творчестве и косплее (если это не часть крупного события).
+
+Если все новости средние — всё равно выбери лучшую из имеющихся.
+
+Список заголовков:
+{titles}
+
+Верни ответ СТРОГО в формате JSON, без других слов и без markdown:
+{{"guid": "выбранный_guid", "reason": "одно предложение почему"}}"""
+
+
+REWRITER_PROMPT = """Ты — автор поста для русскоязычного канала о консольных играх и игровой индустрии. Перепиши новость по строгим правилам:
+
+1. Объём: от 300 до 700 знаков, целевой объём — около 500 знаков.
+2. Язык — русский. БЕЗ англицизмов. Это абсолютное правило.
+   Примеры замен: «релиз» → «выход» / «выпуск», «эксклюзив» → «эксклюзивная игра», «гейм-плей» → «игровой процесс», «контент» → «материалы», «тайтл» → «игра», «ивент» → «событие», «лейаут» → «расположение», «фича» → «возможность» / «особенность».
+   Исключение — официальные названия компаний, игр, платформ и студий: PlayStation, Nintendo Switch, Xbox Series X, Cyberpunk 2077, Take-Two, Rockstar и т.п. оставляй как есть.
+3. Стиль — разговорный, живой, как будто рассказываешь другу за чашкой кофе. Не "согласно сообщениям", а "оказывается" / "представь себе" / "вот что выяснилось".
+4. Эмодзи — ровно 1 или 2 на пост, к месту.
+5. НЕ добавляй: ссылки, хештеги, призывы подписаться, «ставьте лайки», «пишите в комментариях».
+6. НЕ начинай с штампов: «Сегодня...», «На днях...», «Стало известно, что...», «Как сообщает...».
+7. Если в исходном тексте есть мусор (меню сайта, формы подписки, навигация) — игнорируй, бери только суть статьи.
+
+Текст исходной новости:
+{article_text}
+
+Верни СТРОГО только готовый текст поста, без объяснений и без вступительных фраз вроде «вот ваш пост:»."""
+
+
+def call_chadgpt(prompt, api_key):
+    """Делает запрос к ChadGPT API. Возвращает текст ответа или None."""
+    if not api_key:
+        print("✗ CHADGPT_API_KEY не задан!")
+        return None
+
+    payload = {"message": prompt, "api_key": api_key}
+    try:
+        r = requests.post(CHADGPT_API_URL, json=payload, timeout=60)
+        if r.status_code != 200:
+            print(f"✗ HTTP {r.status_code}: {r.text[:200]}")
+            return None
+        data = r.json()
+        if not data.get("is_success"):
+            print(f"✗ Ошибка API: {data.get('error_message')}")
+            return None
+        used = data.get("used_sparks_count", 0)
+        print(f"  Потрачено искр: {used}")
+        return data.get("response", "").strip()
+    except Exception as e:
+        print(f"✗ Запрос упал: {e}")
+        return None
+
+
+def curator_pick(pool_items, published_guids, api_key):
+    """Отдаёт куратору список заголовков, получает выбор."""
+    candidates = [it for it in pool_items if it["guid"] not in published_guids]
+    if not candidates:
+        print("В пуле нет неопубликованных кандидатов")
+        return None
+
+    print(f"\nКуратор выбирает из {len(candidates)} кандидатов...")
+    titles_text = "\n".join(
+        f"- guid: {it['guid']} | {it['title']}" for it in candidates
+    )
+    prompt = CURATOR_PROMPT.format(titles=titles_text)
+
+    answer = call_chadgpt(prompt, api_key)
+    if not answer:
+        return None
+
+    # Парсим JSON-ответ. ИИ иногда оборачивает в ```json``` — убираем
+    answer = re.sub(r"^```(?:json)?\s*", "", answer)
+    answer = re.sub(r"\s*```$", "", answer)
+    try:
+        decision = json.loads(answer)
+        chosen_guid = decision.get("guid")
+        reason = decision.get("reason", "")
+    except Exception as e:
+        print(f"✗ Не смог распарсить ответ куратора: {e}")
+        print(f"  Ответ был: {answer[:300]}")
+        return None
+
+    chosen = next((it for it in candidates if it["guid"] == chosen_guid), None)
+    if not chosen:
+        print(f"✗ Куратор вернул guid {chosen_guid}, но его нет в кандидатах")
+        return None
+
+    print(f"\n✓ Выбрано: {chosen['title']}")
+    print(f"  Причина: {reason}")
+    return chosen
+
+
+def rewrite_article(article_text, api_key):
+    """Просит ИИ сделать рерайт на русском."""
+    # Обрезаем чтобы не тратить токены на огромный текст
+    if len(article_text) > TEXT_FOR_REWRITER_LIMIT:
+        article_text = article_text[:TEXT_FOR_REWRITER_LIMIT]
+        # Не режем посередине предложения
+        last_dot = article_text.rfind(". ")
+        if last_dot > TEXT_FOR_REWRITER_LIMIT * 0.7:
+            article_text = article_text[:last_dot + 1]
+
+    print(f"\nРерайтер пишет пост (на вход {len(article_text)} знаков)...")
+    prompt = REWRITER_PROMPT.format(article_text=article_text)
+    rewritten = call_chadgpt(prompt, api_key)
+    if rewritten:
+        print(f"✓ Получен рерайт: {len(rewritten)} знаков")
+    return rewritten
+
+
+def add_to_feed(item, post_text):
+    """Добавляет одну запись в feed.xml (или создаёт его)."""
+    # Загружаем существующие записи если есть
+    existing = []
+    if os.path.exists(OUTPUT_FEED):
+        try:
+            import feedparser
+            parsed = feedparser.parse(OUTPUT_FEED)
+            for e in parsed.entries:
+                pubdate = datetime.now(timezone.utc)
+                if e.get("published_parsed"):
+                    try:
+                        pubdate = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
+                    except Exception:
+                        pass
+                existing.append({
+                    "title": e.get("title", ""),
+                    "guid": e.get("id", e.get("link", "")),
+                    "pubdate": pubdate,
+                    "fulltext": e.get("summary", ""),
+                })
+        except Exception as e:
+            print(f"Не удалось прочитать старый feed: {e}")
+
+    # Новая запись
+    new_entry = {
+        "title": item["title"],
+        "guid": item["guid"],
+        "pubdate": datetime.now(timezone.utc),
+        "fulltext": post_text,
+    }
+
+    # Объединяем, сортируем по дате (свежие сверху), оставляем последние N
+    all_items = [new_entry] + [
+        e for e in existing if e["guid"] != new_entry["guid"]
+    ]
+    all_items.sort(key=lambda x: x["pubdate"], reverse=True)
+    all_items = all_items[:MAX_ITEMS_IN_FEED]
+
+    # Пишем feed.xml
+    fg = FeedGenerator()
+    fg.title(FEED_TITLE)
+    fg.link(href=FEED_LINK, rel="alternate")
+    fg.description(FEED_DESCRIPTION)
+    fg.language("ru")
+
+    for it in all_items:
+        fe = fg.add_entry(order='append')
+        fe.title(it["title"])
+        fe.link(href=ITEM_LINK_PLACEHOLDER)
+        fe.guid(it["guid"], permalink=False)
+        fe.pubDate(it["pubdate"])
+        fe.description(it["fulltext"])
+
+    fg.rss_file(OUTPUT_FEED, pretty=True)
+    print(f"\n✓ feed.xml обновлён ({len(all_items)} записей)")
+
+
+def main():
+    print(f"=== Публикатор: {datetime.now(timezone.utc).isoformat()} ===")
+
+    api_key = os.environ.get("CHADGPT_API_KEY")
+    if not api_key:
+        print("✗ Переменная CHADGPT_API_KEY не задана. Прерываюсь.")
+        sys.exit(1)
+
+    pool = load_json(POOL_FILE, {"items": []})
+    pool_items = pool.get("items", [])
+    if not pool_items:
+        print("Пул пустой, нечего публиковать")
+        return
+
+    published = load_json(PUBLISHED_FILE, {"guids": []})
+    published_guids = set(published.get("guids", []))
+
+    # 1. Куратор выбирает статью
+    chosen = curator_pick(pool_items, published_guids, api_key)
+    if not chosen:
+        print("Куратор не смог выбрать. Завершаю.")
+        return
+
+    # 2. Скачиваем полный текст выбранной
+    print(f"\nСкачиваю полный текст: {chosen['original_url']}")
+    fulltext, _ = get_full_text(chosen["original_url"])
+    if not fulltext:
+        print("✗ Не удалось скачать текст. Помечу как опубликованную, чтобы не выбирать снова.")
+        published_guids.add(chosen["guid"])
+        save_json(PUBLISHED_FILE, {"guids": list(published_guids)[-100:]})
+        return
+
+    # 3. Рерайтер пишет пост на русском
+    post_text = rewrite_article(fulltext, api_key)
+    if not post_text:
+        print("✗ Рерайт не получился. Не публикую, не помечаю.")
+        return
+
+    # 4. Добавляем в feed.xml
+    add_to_feed(chosen, post_text)
+
+    # 5. Помечаем как опубликованную
+    published_guids.add(chosen["guid"])
+    save_json(PUBLISHED_FILE, {"guids": list(published_guids)[-100:]})
+
+    print("\n=== Публикатор завершил работу ===")
+
+
+if __name__ == "__main__":
+    main()
