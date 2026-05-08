@@ -272,10 +272,8 @@ def build_feed(items):
     fg.language("en")
 
     for item in items:
-        fe = fg.add_entry()
+        fe = fg.add_entry(order='append')
         fe.title(item["title"])
-        # ВАЖНО: в <link> кладём НЕ ссылку на оригинал, а нейтральную заглушку,
-        # чтобы соцсети не делали превью оригинального сайта
         fe.link(href=ITEM_LINK_PLACEHOLDER)
         fe.guid(item["guid"], permalink=False)
         fe.pubDate(item["pubdate"])
