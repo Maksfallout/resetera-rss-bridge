@@ -139,7 +139,7 @@ def fetch_with_trafilatura(url):
 
 
 def fetch_with_jina(url):
-    """Запасной вариант — сервис r.jina.ai."""
+    """Запасной вариант — сервис r.jina.ai. Чистим markdown-мусор перед возвратом."""
     try:
         jina_url = f"https://r.jina.ai/{url}"
         r = requests.get(
@@ -148,10 +148,65 @@ def fetch_with_jina(url):
             timeout=REQUEST_TIMEOUT,
         )
         if r.status_code == 200 and len(r.text) > 200:
-            return r.text
+            return clean_jina_markdown(r.text)
     except Exception as e:
         print(f"  jina упал: {e}")
     return None
+
+
+def clean_jina_markdown(text):
+    """
+    Чистит markdown-вывод r.jina.ai от мусора:
+    1. Убирает шапку с метаданными (Title:, URL Source:, Published Time:, Markdown Content:)
+    2. Убирает markdown-ссылки в формате [текст](url)
+    3. Убирает оставшиеся URL целиком
+    4. Убирает строки с одними звёздочками/пунктом меню
+    """
+    # 1. Срезаем всё до "Markdown Content:" (это шапка от jina)
+    marker = "Markdown Content:"
+    if marker in text:
+        text = text.split(marker, 1)[1]
+
+    # 2. Убираем markdown-ссылки [текст](url) → оставляем только текст
+    text = re.sub(r"\[([^\]]+)\]\(https?://[^)]+\)", r"\1", text)
+
+    # 3. Убираем "пустые" markdown-ссылки []() → совсем удаляем
+    text = re.sub(r"\[\s*\]\([^)]*\)", "", text)
+
+    # 4. Убираем оставшиеся "голые" URL
+    text = re.sub(r"https?://\S+", "", text)
+
+    # 5. Убираем строки, состоящие только из навигационных пунктов
+    # (короткие пунктирные строки типа "* News * Videos * Reviews")
+    lines = text.split("\n")
+    cleaned_lines = []
+    for line in lines:
+        stripped = line.strip()
+        # Пропускаем строки только из звёздочек, тире, пайпов
+        if re.match(r"^[\s*\-|·•]+$", stripped):
+            continue
+        # Пропускаем строки, состоящие почти полностью из коротких "*" пунктов меню
+        # (например "* News * Videos * Reviews * Games")
+        if stripped.startswith("*") and len(stripped) < 200 and stripped.count("*") >= 3:
+            continue
+        cleaned_lines.append(line)
+    text = "\n".join(cleaned_lines)
+
+    # 6. Сжимаем множественные пустые строки
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    # 7. Убираем строки начинающиеся на "By" с автором (типа "By Levi Winslow on May 8")
+    # это часто появляется в шапке после очистки навигации
+    text = re.sub(r"^By [^\n]{1,150}$", "", text, flags=re.MULTILINE)
+
+    # 8. Убираем хвостовые приписки сайтов
+    text = re.sub(
+        r"\b(?:GameSpot|IGN|Polygon|Kotaku) may receive revenue[^\n]*",
+        "",
+        text,
+    )
+
+    return text.strip()
 
 
 def get_full_text(url):
