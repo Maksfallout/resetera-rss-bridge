@@ -157,10 +157,9 @@ def fetch_with_jina(url):
 def clean_jina_markdown(text):
     """
     Чистит markdown-вывод r.jina.ai от мусора:
-    1. Убирает шапку с метаданными (Title:, URL Source:, Published Time:, Markdown Content:)
-    2. Убирает markdown-ссылки в формате [текст](url)
-    3. Убирает оставшиеся URL целиком
-    4. Убирает строки с одними звёздочками/пунктом меню
+    - убирает шапку до начала статьи
+    - убирает футер после конца статьи
+    - удаляет markdown-ссылки, голые URL, формы подписки
     """
     # 1. Срезаем всё до "Markdown Content:" (это шапка от jina)
     marker = "Markdown Content:"
@@ -169,42 +168,89 @@ def clean_jina_markdown(text):
 
     # 2. Убираем markdown-ссылки [текст](url) → оставляем только текст
     text = re.sub(r"\[([^\]]+)\]\(https?://[^)]+\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\(mailto:[^)]+\)", r"\1", text)
 
-    # 3. Убираем "пустые" markdown-ссылки []() → совсем удаляем
+    # 3. Убираем "пустые" markdown-ссылки []()
     text = re.sub(r"\[\s*\]\([^)]*\)", "", text)
 
-    # 4. Убираем оставшиеся "голые" URL
+    # 4. Убираем оставшиеся "голые" URL и email
     text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"\b[\w.-]+@[\w.-]+\.\w+\b", "", text)
 
-    # 5. Убираем строки, состоящие только из навигационных пунктов
-    # (короткие пунктирные строки типа "* News * Videos * Reviews")
+    # 5. Убираем placeholder-ы для картинок (!Image 1, !Image 18 и т.п.)
+    text = re.sub(r"!?Image \d+(?::[^\n]*)?", "", text)
+
+    # 6. Найти заголовок статьи (# Заголовок) и срезать всё ДО второго его появления
+    # Структура jina: # Заголовок — навигация — # Заголовок — текст статьи
+    h1_matches = list(re.finditer(r"^# ([^\n]+)$", text, flags=re.MULTILINE))
+    if len(h1_matches) >= 2:
+        # Второе появление заголовка — это начало основной статьи
+        text = text[h1_matches[1].start():]
+    elif len(h1_matches) == 1:
+        # Один заголовок — берём всё после него
+        text = text[h1_matches[0].end():]
+
+    # 7. Обрезаем хвост — ищем первый признак футера и режем
+    footer_markers = [
+        r"©\s*\d{4}",                          # копирайт
+        r"Got a news tip",                     # обычный конец статей gamespot
+        r"This topic is locked",
+        r"Leave Blank",
+        r"More Sites",
+        r"We've updated our Privacy Policy",
+        r"Manage Consent Preferences",
+        r"Strictly Necessary Cookies",
+        r"Do Not Sell or Share",
+        r"Cookie Preferences",
+        r"ALL RIGHTS RESERVED",
+        r"Sign up for(?:\s+\w+){0,5}\s+newsletter",
+        r"Get the latest gaming news",         # форма подписки gamespot
+        r"By signing up, you agree",
+        r"Use your keyboard",
+        r"Where does your image live",
+    ]
+    earliest_footer = len(text)
+    for pattern in footer_markers:
+        m = re.search(pattern, text, flags=re.IGNORECASE)
+        if m and m.start() < earliest_footer:
+            earliest_footer = m.start()
+    if earliest_footer < len(text):
+        text = text[:earliest_footer]
+
+    # 8. Убираем строки навигационных меню (длинные строки с кучей звёздочек)
     lines = text.split("\n")
     cleaned_lines = []
     for line in lines:
         stripped = line.strip()
-        # Пропускаем строки только из звёздочек, тире, пайпов
-        if re.match(r"^[\s*\-|·•]+$", stripped):
+        # Строки с большой плотностью звёздочек = меню
+        if stripped.count("*") >= 5 and len(stripped) < 800:
             continue
-        # Пропускаем строки, состоящие почти полностью из коротких "*" пунктов меню
-        # (например "* News * Videos * Reviews * Games")
-        if stripped.startswith("*") and len(stripped) < 200 and stripped.count("*") >= 3:
+        # Строки только из звёздочек/тире/пайпов
+        if re.match(r"^[\s*\-|·•]+$", stripped):
             continue
         cleaned_lines.append(line)
     text = "\n".join(cleaned_lines)
 
-    # 6. Сжимаем множественные пустые строки
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    # 9. Убираем мусорные конструкции типа "Sign Up Sign Up", "Upvote (1)"
+    text = re.sub(r"\bSign Up\s+Sign Up\b", "", text)
+    text = re.sub(r"\bUpvote \(\d+\)", "", text)
+    text = re.sub(r"\bSee More\b", "", text)
+    text = re.sub(r"\bThanks for signing up\b", "", text)
 
-    # 7. Убираем строки начинающиеся на "By" с автором (типа "By Levi Winslow on May 8")
-    # это часто появляется в шапке после очистки навигации
-    text = re.sub(r"^By [^\n]{1,150}$", "", text, flags=re.MULTILINE)
-
-    # 8. Убираем хвостовые приписки сайтов
+    # 10. Убираем перечни платформ-тегов в конце статей
+    # ("Nintendo Switch Nintendo Switch 2 PC PlayStation 4 PlayStation 5 Xbox One Xbox Series X")
     text = re.sub(
-        r"\b(?:GameSpot|IGN|Polygon|Kotaku) may receive revenue[^\n]*",
+        r"(?:(?:Nintendo Switch ?2?|PC|PlayStation [45]|Xbox (?:One|Series X)) ?){3,}",
         "",
         text,
     )
+
+    # 11. Убираем подпись "By Имя Фамилия on Date"
+    text = re.sub(r"^By [^\n]{1,150}$", "", text, flags=re.MULTILINE)
+
+    # 12. Сжимаем пустые строки
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
 
     return text.strip()
 
