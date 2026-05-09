@@ -22,7 +22,7 @@ OUTPUT_FEED = "feed.xml"
 ITEM_LINK_PLACEHOLDER = "https://t.me/ConsoleWorkShop"
 USER_AGENT = "Mozilla/5.0 (compatible; RSSBridge/1.0; +https://github.com)"
 REQUEST_TIMEOUT = 25
-POOL_RETENTION_HOURS = 36   # сколько часов держать заголовки в пуле
+POOL_RETENTION_HOURS = 24   # сколько часов держать заголовки в пуле
 # =============================
 
 
