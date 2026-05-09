@@ -163,6 +163,27 @@ def curator_pick(pool_items, published_guids, api_key):
     print(f"  Причина: {reason}")
     return chosen
 
+def is_duplicate_story(chosen_title, published_titles, api_key):
+    """Проверяет через ИИ — не является ли выбранная статья дублём уже опубликованных."""
+    if not published_titles:
+        return False
+
+    titles_list = "\n".join(f"- {t}" for t in published_titles[-10:])
+    prompt = (
+        f"Перед тобой заголовок новой статьи и список уже опубликованных заголовков.\n\n"
+        f"Новая статья: {chosen_title}\n\n"
+        f"Уже опубликованные заголовки:\n{titles_list}\n\n"
+        f"Вопрос: рассказывает ли новая статья по сути об ТОМ ЖЕ событии что и одна из "
+        f"уже опубликованных? Учитывай смысл, а не точное совпадение слов.\n\n"
+        f"Верни СТРОГО одно слово: YES если это дубль, NO если это другая история."
+    )
+    answer = call_chadgpt(prompt, api_key)
+    if not answer:
+        return False
+    is_dup = answer.strip().upper().startswith("YES")
+    if is_dup:
+        print(f"  ⚠ Дубль обнаружен: '{chosen_title}' похожа на уже опубликованную")
+    return is_dup
 
 def rewrite_article(article_text, api_key):
     """Просит ИИ сделать рерайт+перевод. Возвращает (title, text) или None."""
@@ -272,7 +293,7 @@ def main():
         print("Пул пустой, нечего публиковать")
         return
 
-    published = load_json(PUBLISHED_FILE, {"guids": []})
+    published = load_json(PUBLISHED_FILE, {"guids": [], "titles": []})
     published_guids = set(published.get("guids", []))
 
     # 1. Куратор выбирает статью
@@ -281,6 +302,18 @@ def main():
         print("Куратор не смог выбрать. Завершаю.")
         return
 
+    # 1b. Проверяем на смысловой дубль
+    published_data = load_json(PUBLISHED_FILE, {"guids": [], "titles": []})
+    published_titles = published_data.get("titles", [])
+    if is_duplicate_story(chosen["title"], published_titles, api_key):
+        print("Выбранная статья — смысловой дубль. Помечаю GUID и завершаю.")
+        published_guids.add(chosen["guid"])
+        save_json(PUBLISHED_FILE, {
+            "guids": list(published_guids)[-100:],
+            "titles": published_titles
+        })
+        return
+    
     # 2. Скачиваем полный текст выбранной
     print(f"\nСкачиваю полный текст: {chosen['original_url']}")
     fulltext, _ = get_full_text(chosen["original_url"])
@@ -308,6 +341,13 @@ def main():
 
     print("\n=== Публикатор завершил работу ===")
 
+    # 6. Помечаем как опубликованную — сохраняем GUID и заголовок
+    published_guids.add(chosen["guid"])
+    published_titles.append(post_title)
+    save_json(PUBLISHED_FILE, {
+        "guids": list(published_guids)[-100:],
+        "titles": published_titles[-30:]   # храним последние 30 заголовков
+    })
 
 if __name__ == "__main__":
     main()
