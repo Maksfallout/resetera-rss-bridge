@@ -1,8 +1,6 @@
 name: Collect Headlines
 
 on:
-  schedule:
-    - cron: '0 * * * *'   # каждый час в 00 минут
   workflow_dispatch:
 
 permissions:
