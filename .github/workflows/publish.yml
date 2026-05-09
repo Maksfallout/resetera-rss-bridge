@@ -1,8 +1,6 @@
 name: Publish Daily Post
 
 on:
-  schedule:
-    - cron: '0 9 * * *'   # каждый день в 09:00 UTC = 12:00 МСК
   workflow_dispatch:
 
 permissions:
