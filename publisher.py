@@ -21,7 +21,7 @@ from common import (
 
 # ====== НАСТРОЙКИ ИИ ======
 CHADGPT_API_URL_FAST = "https://ask.chadgpt.ru/api/public/gpt-5-mini"   # для куратора, проверки дублей, промпта картинок
-CHADGPT_API_URL_SMART = "https://ask.chadgpt.ru/api/public/gpt-5.4"     # для рерайта (мощнее)
+CHADGPT_API_URL_SMART = "https://ask.chadgpt.ru/api/public/claude-4.5-sonnet"     # для рерайта (мощнее)
 TEXT_FOR_REWRITER_LIMIT = 8000      # сколько знаков статьи отдаём ИИ
 MAX_ITEMS_IN_FEED = 10              # сколько последних постов держим в feed.xml
 # ==========================
