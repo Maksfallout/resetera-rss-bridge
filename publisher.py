@@ -349,59 +349,77 @@ def main():
 
     published = load_json(PUBLISHED_FILE, {"guids": [], "titles": []})
     published_guids = set(published.get("guids", []))
+    published_titles = published.get("titles", [])
 
-    # 1. Куратор выбирает статью
-    chosen = curator_pick(pool_items, published_guids, api_key)
-    if not chosen:
-        print("Куратор не смог выбрать. Завершаю.")
-        return
+    max_attempts = 5  # Защита от бесконечного цикла и слива токенов
+    attempt = 0
+    success = False
 
-    # 1b. Проверяем на смысловой дубль
-    published_data = load_json(PUBLISHED_FILE, {"guids": [], "titles": []})
-    published_titles = published_data.get("titles", [])
-    if is_duplicate_story(chosen["title"], published_titles, api_key):
-        print("Выбранная статья — смысловой дубль. Помечаю GUID и завершаю.")
+    # Запускаем цикл поиска подходящей новости
+    while attempt < max_attempts and not success:
+        attempt += 1
+        print(f"\n--- Итерация {attempt} из {max_attempts} ---")
+
+        # 1. Куратор выбирает статью
+        chosen = curator_pick(pool_items, published_guids, api_key)
+        if not chosen:
+            print("Куратор не смог выбрать (или пул исчерпан). Завершаю поиск.")
+            break
+
+        # 1b. Проверяем на смысловой дубль
+        if is_duplicate_story(chosen["title"], published_titles, api_key):
+            print("Выбранная статья — смысловой дубль. Помечаю GUID и ищу следующую.")
+            published_guids.add(chosen["guid"])
+            save_json(PUBLISHED_FILE, {
+                "guids": list(published_guids)[-100:],
+                "titles": published_titles
+            })
+            continue  # <-- Идем на следующий круг цикла
+
+        # 2. Скачиваем полный текст выбранной
+        print(f"\nСкачиваю полный текст: {chosen['original_url']}")
+        fulltext, _ = get_full_text(chosen["original_url"])
+        if not fulltext:
+            print("✗ Не удалось скачать текст. Помечу как опубликованную, чтобы не выбирать снова, и ищу дальше.")
+            published_guids.add(chosen["guid"])
+            save_json(PUBLISHED_FILE, {
+                "guids": list(published_guids)[-100:],
+                "titles": published_titles
+            })
+            continue  # <-- Идем на следующий круг цикла
+
+        # 3. Рерайтер пишет пост на русском
+        rewrite_result = rewrite_article(fulltext, api_key)
+        if not rewrite_result:
+            print("✗ Рерайт не получился. Помечу GUID, чтобы не зацикливаться на битой статье, и ищу дальше.")
+            published_guids.add(chosen["guid"])
+            save_json(PUBLISHED_FILE, {
+                "guids": list(published_guids)[-100:],
+                "titles": published_titles
+            })
+            continue  # <-- Идем на следующий круг цикла
+
+        # 4. Добавляем в feed.xml
+        post_title, post_text = rewrite_result
+        chosen_with_ru_title = dict(chosen)
+        chosen_with_ru_title["title"] = post_title
+        add_to_feed(chosen_with_ru_title, post_text)
+
+        # 5. Помечаем как опубликованную — сохраняем GUID и заголовок
         published_guids.add(chosen["guid"])
+        published_titles.append(post_title)
         save_json(PUBLISHED_FILE, {
             "guids": list(published_guids)[-100:],
-            "titles": published_titles
+            "titles": published_titles[-30:]   # храним последние 30 заголовков
         })
-        return
-    
-    # 2. Скачиваем полный текст выбранной
-    print(f"\nСкачиваю полный текст: {chosen['original_url']}")
-    fulltext, _ = get_full_text(chosen["original_url"])
-    if not fulltext:
-        print("✗ Не удалось скачать текст. Помечу как опубликованную, чтобы не выбирать снова.")
-        published_guids.add(chosen["guid"])
-        save_json(PUBLISHED_FILE, {"guids": list(published_guids)[-100:]})
-        return
 
-    # 3. Рерайтер пишет пост на русском
-    rewrite_result = rewrite_article(fulltext, api_key)
-    if not rewrite_result:
-        print("✗ Рерайт не получился. Не публикую, не помечаю.")
-        return
-    post_title, post_text = rewrite_result
+        # Если дошли до сюда, значит все прошло успешно
+        success = True
+        print("\n=== Публикатор успешно завершил работу ===")
 
-    # 4. Добавляем в feed.xml — используем переведённый заголовок
-    chosen_with_ru_title = dict(chosen)
-    chosen_with_ru_title["title"] = post_title
-    add_to_feed(chosen_with_ru_title, post_text)
-
-    # 5. Помечаем как опубликованную
-    published_guids.add(chosen["guid"])
-    save_json(PUBLISHED_FILE, {"guids": list(published_guids)[-100:]})
-
-    print("\n=== Публикатор завершил работу ===")
-
-    # 6. Помечаем как опубликованную — сохраняем GUID и заголовок
-    published_guids.add(chosen["guid"])
-    published_titles.append(post_title)
-    save_json(PUBLISHED_FILE, {
-        "guids": list(published_guids)[-100:],
-        "titles": published_titles[-30:]   # храним последние 30 заголовков
-    })
+    # Если мы исчерпали попытки, но так ничего и не опубликовали
+    if not success:
+        print("\n✗ Не удалось опубликовать статью за отведенное число попыток.")
 
 if __name__ == "__main__":
     main()
