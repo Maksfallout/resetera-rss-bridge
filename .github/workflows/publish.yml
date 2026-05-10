@@ -34,7 +34,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A feed.xml published.json images/ 2>/dev/null || true
+          git add -A
           git diff --staged --quiet || git commit -m "Publish daily post [skip ci]"
-          git pull origin main --rebase  # 👈 Добавлено: синхронизируемся с удалённым репозиторием
-          git push origin main           # 👈 Исправлено: убрали "|| true", чтобы видеть реальный статус
+          git pull origin main --rebase --autostash
+          git push origin main
